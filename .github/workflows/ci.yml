@@ -83,9 +83,26 @@ jobs:
           Check "native no stack"     ($r.Out -notmatch "at PclVanillaRestore|StackTrace") "stack leaked"
           Check "native readable err" ($r.Out -match "失败") "no readable error"
 
-          # 5) 版本对齐：工具版本应与所支持的 PCL2 主版本一致
+          # 5) 自动模式在 CI（输出被重定向）下绝不能弹模态框阻塞：必须快速返回
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $r = Invoke-Tool @("--auto")
+          $sw.Stop()
+          Check "auto does not block"  ($sw.Elapsed.TotalSeconds -lt 30) "took $($sw.Elapsed.TotalSeconds)s"
+          Check "auto exit 0/3"        ($r.Code -eq 0 -or $r.Code -eq 3) "got $($r.Code)"
+          Check "auto no GUI launch"   ($r.Out -match "无法弹出选择框|非交互桌面，跳过自动启动|不会自动启动") "no non-interactive notice"
+
+          # 6) 版本对齐：工具版本应与所支持的 PCL2 主版本一致
           $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe).Path)
           Check "tool version aligns PCL 2.99" ($vi.ProductVersion -like "2.99*") "ProductVersion=$($vi.ProductVersion)"
+
+          # 7) 工具图标已嵌入（沿用 PCL2 图标，便于用户认出该双击哪个）
+          $ic = $null
+          try {
+            Add-Type -AssemblyName System.Drawing
+            $ic = [System.Drawing.Icon]::ExtractAssociatedIcon((Resolve-Path $exe).Path)
+            Check "icon embedded" ($null -ne $ic -and $ic.Width -gt 0) "no icon"
+          } catch { Check "icon embedded" $false $_.Exception.Message }
+          finally { if ($ic) { $ic.Dispose() } }
 
           if ($fail -gt 0) { Write-Host "$fail smoke assertion(s) failed"; exit 1 }
           Write-Host "all smoke tests passed"

@@ -9,13 +9,17 @@
     <RootNamespace>PCL2VanillaRestore</RootNamespace>
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 沿用 PCL2 本体图标（从其 .rsrc 逐字节重建的 13 帧 .ico），
+         方便不熟悉命令行的用户在文件夹里一眼认出该双击哪个 -->
+    <ApplicationIcon>assets\pcl2.ico</ApplicationIcon>
     <InvariantGlobalization>false</InvariantGlobalization>
 
-    <!-- 工具版本对齐其所支持的 PCL2 版本：PCL2 2.99.0.0 -> 工具 2.99.0 -->
-    <Version>2.99.0</Version>
+    <!-- 版本对齐 PCL2：前三段 = 所支持的 PCL2 版本（2.99.0），
+         末位为工具自身修订号（加特性/修 bug 时递增），不影响适配的 PCL 版本 -->
+    <Version>2.99.0.1</Version>
     <AssemblyVersion>2.99.0.0</AssemblyVersion>
-    <FileVersion>2.99.0.0</FileVersion>
-    <InformationalVersion>2.99.0</InformationalVersion>
+    <FileVersion>2.99.0.1</FileVersion>
+    <InformationalVersion>2.99.0.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
 
