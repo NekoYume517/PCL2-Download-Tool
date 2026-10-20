@@ -1,0 +1,15 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# 构建产物（发布用 Release 附件，不入库）
+artifacts/
+publish/
+*.zip
+
+# IDE
+.idea/
+.vscode/

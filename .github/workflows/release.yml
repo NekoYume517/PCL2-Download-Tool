@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        include:
+          - rid: win-x64
+            dotnetRid: win-x64
+            label: PCL2VanillaRestore-win-x64.zip
+            self: true
+          - rid: win-x86
+            dotnetRid: win-x86
+            label: PCL2VanillaRestore-win-x86.zip
+            self: true
+          - rid: portable
+            dotnetRid: win-x64
+            label: PCL2VanillaRestore-portable.exe
+            self: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Publish (${{ matrix.rid }})
+        run: >
+          dotnet publish -c Release -r ${{ matrix.dotnetRid }}
+          --self-contained ${{ matrix.self }}
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=${{ matrix.self }}
+          -p:EnableCompressionInSingleFile=${{ matrix.self }}
+          -o ./out/${{ matrix.rid }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $exe = "./out/${{ matrix.rid }}/PCL2VanillaRestore.exe"
+          if ("${{ matrix.rid }}" -eq "portable") {
+            Copy-Item $exe "./out/PCL2VanillaRestore-portable.exe"
+          } else {
+            Compress-Archive -Path $exe -DestinationPath "./out/${{ matrix.label }}" -Force
+          }
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./out/${{ matrix.label }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true

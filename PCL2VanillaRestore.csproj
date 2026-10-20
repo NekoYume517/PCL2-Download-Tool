@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PCL2VanillaRestore</AssemblyName>
+    <RootNamespace>PCL2VanillaRestore</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Version>1.0.0</Version>
+    <Authors>NekoYume517</Authors>
+    <Product>PCL2 Vanilla Download Restore Tool</Product>
+    <Description>Restore the "Download → Vanilla Game" entry point in Plain Craft Launcher 2 (PCL2) 2.99 by an equal-length IL patch.</Description>
+    <Copyright>Copyright (c) 2026 NekoYume517</Copyright>
+    <RepositoryUrl>https://github.com/NekoYume517/PCL2-VanillaDownload-Restore</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+
+</Project>

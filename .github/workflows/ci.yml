@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Publish win-x64 (self-contained single file)
+        run: >
+          dotnet publish -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -o ./artifacts/win-x64
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $exe = "./artifacts/win-x64/PCL2VanillaRestore.exe"
+          if (-not (Test-Path $exe)) { Write-Error "publish output missing"; exit 1 }
+          # 无参数、无可分析文件：应打印帮助并返回 3，而不是崩溃
+          $out = & $exe 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host "--- exit=$code ---"
+          Write-Host $out
+          if ($code -ne 3) { Write-Error "expected exit 3 for no target, got $code"; exit 1 }
+          if ($out -notmatch "PCL2") { Write-Error "banner missing"; exit 1 }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-win-x64
+          path: ./artifacts/win-x64/PCL2VanillaRestore.exe
+          if-no-files-found: error
