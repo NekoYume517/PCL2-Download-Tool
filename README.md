@@ -2,7 +2,7 @@
 
 Restore the **"下载 → 原版游戏"** entry point in **Plain Craft Launcher 2 (PCL2) 2.99**.
 
-[![Release](https://img.shields.io/github/v/release/NekoYume517/PCL2-VanillaDownload-Restore?label=release)](https://github.com/NekoYume517/PCL2-VanillaDownload-Restore/releases)
+[![Release](https://img.shields.io/github/v/release/NekoYume517/PCL2-Download-Tool?label=release)](https://github.com/NekoYume517/PCL2-Download-Tool/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![.NET](https://img.shields.io/badge/.NET-8.0--self--contained-512BD4)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -28,7 +28,7 @@ assets 下载——**一行都没删**，完好地躺在镜像里。
 
 ## 下载
 
-去 [Releases](https://github.com/NekoYume517/PCL2-VanillaDownload-Restore/releases) 下载：
+去 [Releases](https://github.com/NekoYume517/PCL2-Download-Tool/releases) 下载：
 
 | 文件 | 说明 |
 | --- | --- |

@@ -23,7 +23,7 @@
     <Product>PCL2 Vanilla Download Restore Tool</Product>
     <Description>Restore the "Download → Vanilla Game" entry point in Plain Craft Launcher 2 (PCL2) 2.99 by an equal-length IL patch.</Description>
     <Copyright>Copyright (c) 2026 NekoYume517</Copyright>
-    <RepositoryUrl>https://github.com/NekoYume517/PCL2-VanillaDownload-Restore</RepositoryUrl>
+    <RepositoryUrl>https://github.com/NekoYume517/PCL2-Download-Tool</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
