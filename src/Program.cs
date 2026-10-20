@@ -40,16 +40,49 @@ static class PclVanillaRestore
     const string KillHintA = "为遵守相关法律法规";
     const string KillHintB = "不再提供 MC 下载";
 
+    // 工具版本对齐其所支持的 PCL2 程序集版本。
+    // 定位逻辑是模式匹配（不硬编码地址），因此对相邻版本通常也有效；
+    // 这里只做提示：版本不等于已验证版本时给出 warning，但仍尝试。
+    const string SupportedPclVersion = "2.99.0.0";
+
+    static string ToolVersion()
+    {
+        var v = typeof(PclVanillaRestore).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .Cast<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
+            ?? typeof(PclVanillaRestore).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+        return v;
+    }
+
     static bool _quiet;
     static void Log(string s) { if (!_quiet) Console.WriteLine(s); }
     static void Warn(string s) { if (!_quiet) Console.WriteLine("  ! " + s); }
 
     static int Main(string[] args)
     {
+        try
+        {
+            return Run(args);
+        }
+        catch (Exception ex)
+        {
+            // 用户可能把任意文件拖进来（原生 exe、损坏文件等），给出可读错误而非堆栈
+            Console.WriteLine($"  ✗ 失败：{ex.Message}");
+            if (ex is Mono.Cecil.AssemblyResolutionException)
+                Console.WriteLine("    （目标不是可独立分析的托管程序集，或依赖缺失）");
+            return 5;
+        }
+    }
+
+    static int Run(string[] args)
+    {
         Console.OutputEncoding = Encoding.UTF8;
         string target = null, outPath = null;
         bool inPlace = false, dry = false;
         _quiet = args.Contains("--quiet");
+
+        // banner 先于参数解析打印，确保 --help / 无目标 时也带着版本信息
+        Console.WriteLine($"PCL2 原版游戏下载入口恢复器 v{ToolVersion()}  （适配 PCL2 {SupportedPclVersion}）");
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -66,8 +99,6 @@ static class PclVanillaRestore
                     break;
             }
         }
-
-        Console.WriteLine("PCL2 原版游戏下载入口恢复器");
 
         target ??= AutoFindTarget();
         if (target == null)
@@ -92,6 +123,22 @@ static class PclVanillaRestore
         Console.WriteLine($"  SHA-256 : {sha}");
         var asmName = module.Assembly?.Name;
         Console.WriteLine($"  程序集  : {asmName?.Name} {asmName?.Version}  CLR {module.RuntimeVersion}");
+
+        // ---- 版本对齐检查 ----
+        if (!string.Equals(asmName?.Name, "Plain Craft Launcher 2", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  ✗ 目标程序集名为 “{asmName?.Name}”，不是 Plain Craft Launcher 2。");
+            Console.WriteLine("    为安全起见已中止。请确认选对了启动器 exe。");
+            return 4;
+        }
+        string ver = asmName?.Version?.ToString() ?? "";
+        if (ver != SupportedPclVersion)
+        {
+            Console.WriteLine($"  ! 目标版本 {ver} ≠ 已验证版本 {SupportedPclVersion}");
+            Console.WriteLine("    定位逻辑为模式匹配（不依赖硬编码地址），通常仍可尝试；");
+            Console.WriteLine("    若后续自检未通过，请勿使用该产物。");
+        }
         Console.WriteLine();
 
         var sites = FindKillSites(module, allTypes);
@@ -185,6 +232,7 @@ static class PclVanillaRestore
         Console.WriteLine("  -h, --help      显示本帮助");
         Console.WriteLine();
         Console.WriteLine("退出码：0 成功/无需修改 · 2 自检未通过 · 3 未找到目标文件");
+        Console.WriteLine("        4 目标不是 Plain Craft Launcher 2 · 5 分析失败（非托管 exe 等）");
     }
 
     // ---------------- 站点发现 ----------------

@@ -10,7 +10,15 @@
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <InvariantGlobalization>false</InvariantGlobalization>
-    <Version>1.0.0</Version>
+
+    <!-- 工具版本对齐其所支持的 PCL2 版本：PCL2 2.99.0.0 -> 工具 2.99.0 -->
+    <Version>2.99.0</Version>
+    <AssemblyVersion>2.99.0.0</AssemblyVersion>
+    <FileVersion>2.99.0.0</FileVersion>
+    <InformationalVersion>2.99.0</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
+
     <Authors>NekoYume517</Authors>
     <Product>PCL2 Vanilla Download Restore Tool</Product>
     <Description>Restore the "Download → Vanilla Game" entry point in Plain Craft Launcher 2 (PCL2) 2.99 by an equal-length IL patch.</Description>

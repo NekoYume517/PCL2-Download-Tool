@@ -33,15 +33,65 @@ jobs:
       - name: Smoke test
         shell: pwsh
         run: |
+          # 本步骤刻意断言非零退出码（工具用退出码表达结果）。
+          # Actions 的 pwsh 默认 ErrorActionPreference=Stop，且 PS 7.3+
+          # PSNativeCommandUseErrorActionPreference=$true，会让原生程序的非零退出码
+          # 直接把步骤判失败（断言全过也失败）。必须在此关闭这两项，改由显式断言接管。
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
           $exe = "./artifacts/win-x64/PCL2VanillaRestore.exe"
           if (-not (Test-Path $exe)) { Write-Error "publish output missing"; exit 1 }
-          # 无参数、无可分析文件：应打印帮助并返回 3，而不是崩溃
-          $out = & $exe 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host "--- exit=$code ---"
-          Write-Host $out
-          if ($code -ne 3) { Write-Error "expected exit 3 for no target, got $code"; exit 1 }
-          if ($out -notmatch "PCL2") { Write-Error "banner missing"; exit 1 }
+          $fail = 0
+
+          function Invoke-Tool([string[]]$toolArgs) {
+            $o = & $exe @toolArgs 2>&1 | Out-String
+            return @{ Out = $o; Code = $LASTEXITCODE }
+          }
+
+          function Check([string]$name, [bool]$cond, [string]$detail) {
+            if ($cond) { Write-Host "  PASS  $name" }
+            else { Write-Host "  FAIL  $name -- $detail"; $script:fail++ }
+          }
+
+          # 1) --help：应打印用法并返回 0
+          $r = Invoke-Tool @("--help")
+          Check "help exit 0"        ($r.Code -eq 0)  "got $($r.Code)"
+          Check "help shows usage"   ($r.Out -match "用法：") "no usage line"
+          Check "banner has version" ($r.Out -match "v\d+\.\d+") "no version in banner"
+
+          # 2) 无参数、无可分析文件：应返回 3 并打印用法
+          $r = Invoke-Tool @()
+          Check "no-target exit 3"   ($r.Code -eq 3)  "got $($r.Code)"
+          Check "no-target banner"   ($r.Out -match "PCL2") "banner missing"
+
+          # 3) 非 PCL 的托管程序集：应识别并拒绝，返回 4
+          #    用本工具自己的构建产物做样本——确定是托管程序集，且程序集名必然不是 PCL。
+          $managed = (Get-ChildItem "./bin/Release/net8.0" -Filter "PCL2VanillaRestore.dll" -ErrorAction SilentlyContinue |
+                      Select-Object -First 1).FullName
+          if ($managed) {
+            $r = Invoke-Tool @($managed, "--dry")
+            Check "foreign managed exit 4" ($r.Code -eq 4) "got $($r.Code)"
+            Check "foreign managed reason" ($r.Out -match "不是 Plain Craft Launcher 2") "no reason printed"
+          } else {
+            Write-Host "  SKIP  foreign managed assembly (build output not found)"
+          }
+
+          # 4) 原生（非托管）exe：应给出可读错误而非堆栈，返回 5
+          $r = Invoke-Tool @("$env:SystemRoot\System32\notepad.exe", "--dry")
+          Check "native exit 5"       ($r.Code -eq 5)  "got $($r.Code)"
+          Check "native no stack"     ($r.Out -notmatch "at PclVanillaRestore|StackTrace") "stack leaked"
+          Check "native readable err" ($r.Out -match "失败") "no readable error"
+
+          # 5) 版本对齐：工具版本应与所支持的 PCL2 主版本一致
+          $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe).Path)
+          Check "tool version aligns PCL 2.99" ($vi.ProductVersion -like "2.99*") "ProductVersion=$($vi.ProductVersion)"
+
+          if ($fail -gt 0) { Write-Host "$fail smoke assertion(s) failed"; exit 1 }
+          Write-Host "all smoke tests passed"
+          # 必须显式 exit 0：上面调用过返回非零码的原生命令，
+          # 落到脚本末尾会把 $LASTEXITCODE 当作步骤退出码。
+          exit 0
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
