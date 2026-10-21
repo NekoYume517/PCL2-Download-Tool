@@ -18,10 +18,10 @@
 
     <!-- 版本对齐 PCL2：前三段 = 所支持的 PCL2 版本（2.99.0），
          末位为工具自身修订号（加特性/修 bug 时递增），不影响适配的 PCL 版本 -->
-    <Version>2.99.0.3</Version>
+    <Version>2.99.0.4</Version>
     <AssemblyVersion>2.99.0.0</AssemblyVersion>
-    <FileVersion>2.99.0.3</FileVersion>
-    <InformationalVersion>2.99.0.3</InformationalVersion>
+    <FileVersion>2.99.0.4</FileVersion>
+    <InformationalVersion>2.99.0.4</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
 
