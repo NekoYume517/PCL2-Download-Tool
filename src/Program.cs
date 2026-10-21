@@ -31,11 +31,26 @@
 //   依赖导致的 Cecil 整元数据重建失败问题。
 //
 //   发现过程完全基于模式匹配，不硬编码地址，因此可用于同结构的其它版本 / 分支。
+//
+// 2.99.0.1 新增：整合包导入解锁
+//   ModModpack 里有**两条**独立的 kill 路径：
+//     A) ModpackInstall()（无参）—— 点「导入整合包」走的入口，整段被换成
+//        只弹一条 Hint（"为遵守相关法律法规……"）然后 return。
+//        真实现是：Dialogs.SelectFile 选文件 → RunInThread(ModpackInstall(File))。
+//     B) ModpackInstall(string,string,string) 的 finally 之前 —— 解析完整合包类型后
+//        无条件 ldstr + newobj Exception + throw，把 A 恢复后就会撞上这条。
+//        真实现是按 PackType switch 分派到 InstallPack{CurseForge,HMCL,MMC,MCBBS,
+//        Modrinth,LauncherPack,Compress}。
+//   这两处**方法体长度必然变化**，无法等长替换，因此必须用 Cecil 重写元数据。
+//   为此本工具会先从 PCL.Resources.resources 里把内嵌依赖（PCLCS / MeloongCore /
+//   MeloongCore.Wpf / Newtonsoft.Json …）解到临时目录，喂给 Cecil 的 AssemblyResolver，
+//   写回时再删掉。已实测 4451 个方法体语义零差异。
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Resources;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -414,33 +429,52 @@ static class PclVanillaRestore
                             string target, string outPath, bool inPlace, bool dry, bool autoMode)
     {
         var sites = FindKillSites(module, allTypes);
-        if (sites.Count == 0)
+
+        // 整合包解锁：这条链是另一套 kill（ModModpack），与方法体长度无关，需单独判断。
+        // 注意：读取阶段不需要 resolver，只有写回时才需要内嵌依赖。
+        var modpackNeeded = NeedsModpackPatch(module, out bool modpackEntryKilled, out bool modpackDispatchKilled);
+
+        if (sites.Count == 0 && !modpackNeeded)
         {
             var already = FindAlreadyRestored(allTypes);
             if (already != null)
                 Console.WriteLine($"  未发现替身加载器；{already.Type.Name}::{already.Method.Name} 已直接引用 {already.RealField.Name}，看起来是已修复版或未被限制的版本。");
             else
                 Console.WriteLine("  未发现「原版游戏下载」入口被替换的痕迹（可能该版本未做此限制）。");
+            Console.WriteLine("  整合包导入入口同样是可用的（未发现 kill 桩）。");
             Console.WriteLine("  无需修改。");
             if (autoMode && !dry) LaunchPcl2(outPath);
             else PauseIfInteractive();
             return 0;
         }
 
-        Console.WriteLine($"  发现 {sites.Count} 处入口替换：");
-        foreach (var s in sites)
-            Console.WriteLine($"    · {s.Type.Name}::{s.Method.Name}  (RVA 0x{s.Method.RVA:X})  替身名=\"{s.FakeName}\"  段 IL_{s.StartOff:X4}..IL_{s.EndOff:X4} ({s.Len}B)  -> {s.RealField?.DeclaringType.Name}::{s.RealField?.Name}");
-        Console.WriteLine();
-
-        foreach (var s in sites)
+        if (sites.Count > 0)
         {
-            if (s.RealField == null)
+            Console.WriteLine($"  发现 {sites.Count} 处「原版游戏下载」入口替换：");
+            foreach (var s in sites)
+                Console.WriteLine($"    · {s.Type.Name}::{s.Method.Name}  (RVA 0x{s.Method.RVA:X})  替身名=\"{s.FakeName}\"  段 IL_{s.StartOff:X4}..IL_{s.EndOff:X4} ({s.Len}B)  -> {s.RealField?.DeclaringType.Name}::{s.RealField?.Name}");
+            Console.WriteLine();
+
+            foreach (var s in sites)
             {
-                Console.WriteLine($"  ! 无法为 {s.Type.Name}::{s.Method.Name} 找到真实加载器字段，跳过");
-                continue;
+                if (s.RealField == null)
+                {
+                    Console.WriteLine($"  ! 无法为 {s.Type.Name}::{s.Method.Name} 找到真实加载器字段，跳过");
+                    continue;
+                }
+                Validate(s);
+                Describe(s);
             }
-            Validate(s);
-            Describe(s);
+        }
+
+        if (modpackNeeded)
+        {
+            Console.WriteLine("  发现「导入整合包」入口被关闭：");
+            if (modpackEntryKilled)
+                Console.WriteLine("    · ModModpack::ModpackInstall()  —— 整段替换为只弹提示，真实现是「选文件 + 起线程安装」");
+            if (modpackDispatchKilled)
+                Console.WriteLine("    · ModModpack::ModpackInstall(string,string,string)  —— 解析完包类型后无条件 throw，真实现是按类型分派");
+            Console.WriteLine();
         }
 
         if (dry) { Console.WriteLine("\n--dry：仅分析，不写盘"); return 0; }
@@ -474,7 +508,7 @@ static class PclVanillaRestore
             Console.WriteLine($"  ✓ {s.Type.Name}::{s.Method.Name}  IL_{s.StartOff:X4} 处 {s.Len}B 已替换为 ldsfld {s.RealField.Name} + {repl.Count - 5}× nop");
         }
 
-        if (patched == 0) { Console.WriteLine("  没有可应用的补丁"); PauseIfInteractive(); return 2; }
+        if (patched == 0 && !modpackNeeded) { Console.WriteLine("  没有可应用的补丁"); PauseIfInteractive(); return 2; }
 
         // 启动器正在运行时其 exe 被自身锁定，原地写盘必然抛 IOException。
         // 旧版在这里直接崩掉、只往控制台写了一行就退出 —— 双击时表现为"黑框一闪就没"。
@@ -496,10 +530,27 @@ static class PclVanillaRestore
             Console.WriteLine($"  备份 : {bak}");
         }
         var tmp = outPath + ".tmp";
+
+        // 两段式写盘：
+        //   第一段 = 等长字节手术（入口 A，保证 codeSize/分支/EH 全不动）
+        //   第二段 = 整合包解锁（Cecil 全量重写，方法体长度会变）
+        // 分两步是为了让 A 的「字节级不变」性质不被 Cecil 重排破坏 —— 若反过来，
+        // Cecil 重写会重算整个方法体布局，A 的等长保证就失效了。
+        string modpackApplied = null;
         try
         {
-            File.WriteAllBytes(tmp, outBuf);
-            File.Move(tmp, outPath, true);
+            if (modpackNeeded)
+            {
+                File.WriteAllBytes(tmp, outBuf);                 // 第一段落到临时文件
+                Console.WriteLine("  正在解锁整合包导入（需重写元数据，可能稍慢）……");
+                modpackApplied = ApplyModpack(tmp);
+                File.Move(tmp, outPath, true);
+            }
+            else
+            {
+                File.WriteAllBytes(tmp, outBuf);
+                File.Move(tmp, outPath, true);
+            }
         }
         catch (Exception ex)
         {
@@ -516,7 +567,7 @@ static class PclVanillaRestore
         Console.WriteLine($"\n  已写出 : {outPath}  ({new FileInfo(outPath).Length:N0} 字节)");
 
         // ================= 4. 回读自检 =================
-        int rc = Verify(outPath, sites, file, outBuf);
+        int rc = Verify(outPath, sites, file, outBuf, modpackApplied);
 
         // ================= 5. 自动模式下启动 =================
         if (autoMode)
@@ -559,6 +610,8 @@ static class PclVanillaRestore
             "用法：PCL2VanillaRestore.exe [选项] \"Plain Craft Launcher 2.exe\"\n" +
             "      最简单的方式：把本程序和启动器放在同一个文件夹，直接双击本程序。\n" +
             "      也可以把启动器 exe 拖到本程序图标上。\n" +
+            "\n" +
+            "作用：恢复「下载 → 原版游戏」与「版本选择 → 导入整合包」两个被关闭的入口。\n" +
             "\n" +
             "选项：\n" +
             "  --auto / --no-auto  强制开启 / 关闭自动模式（默认：双击或拖放时开启）\n" +
@@ -764,7 +817,7 @@ static class PclVanillaRestore
         Console.WriteLine($"    异常处理块 : {s.Body.ExceptionHandlers.Count} 个（等长替换不影响其偏移）");
     }
 
-    static int Verify(string path, List<Site> sites, byte[] orig, byte[] now)
+    static int Verify(string path, List<Site> sites, byte[] orig, byte[] now, string modpackNote)
     {
         Console.WriteLine("\n  —— 回读自检 ——");
         bool allOk = true;
@@ -782,14 +835,124 @@ static class PclVanillaRestore
             Console.WriteLine($"    {(ok ? "✓" : "✗")} {t.Name}::{m.Name}  codeSize={m.Body.CodeSize}B(不变)  ldstr=[{string.Join(",", strs)}]  ldsfld=[{string.Join(",", flds)}]");
             allOk &= ok;
         }
+
+        // 整合包：重写后必须能正常读回、没有悬空引用、入口/分派都已是真实现
+        if (modpackNote != null)
+        {
+            var mp = ct.FirstOrDefault(x => x.FullName == "PCL.ModModpack");
+            if (mp == null) { Console.WriteLine("    ✗ 整合包：重写后找不到 PCL.ModModpack"); allOk = false; }
+            else
+            {
+                var entry = mp.Methods.FirstOrDefault(x => x.Name == "ModpackInstall" && x.Parameters.Count == 0);
+                var full = mp.Methods.FirstOrDefault(x => x.Name == "ModpackInstall" && x.Parameters.Count == 3);
+                bool eOk = entry?.Body != null && entry.Body.Instructions.Any(i =>
+                    i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "RunInThread");
+                bool dOk = full?.Body != null && full.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch)
+                           && !full.Body.Instructions.Any(i =>
+                               i.OpCode == OpCodes.Ldstr && i.Operand is string s && s.Contains(KillHintA));
+
+                var audit = new List<string>();
+                if (entry != null) audit.AddRange(ModpackPatch.Audit(entry));
+                if (full != null) audit.AddRange(ModpackPatch.Audit(full));
+
+                bool ok = eOk && dOk && audit.Count == 0;
+                Console.WriteLine($"    {(ok ? "✓" : "✗")} 整合包入口 ModpackInstall()  codeSize={(entry?.Body?.CodeSize ?? -1)}B  含 RunInThread={eOk}");
+                Console.WriteLine($"    {(ok ? "✓" : "✗")} 整合包分派 ModpackInstall(3参)  codeSize={(full?.Body?.CodeSize ?? -1)}B  含 switch={dOk}");
+                if (audit.Count > 0) Console.WriteLine("      悬空引用：" + string.Join("；", audit.Take(3)));
+                allOk &= ok;
+            }
+        }
+
         int diff = 0, lo = int.MaxValue, hi = -1;
-        for (int i = 0; i < orig.Length; i++) if (orig[i] != now[i]) { diff++; if (i < lo) lo = i; if (i > hi) hi = i; }
-        Console.WriteLine($"    字节差异 : {diff} 处，区间 [0x{lo:X}..0x{hi:X}]，文件尺寸 {orig.Length} -> {now.Length}");
-        Console.WriteLine($"    结论 : {(allOk ? "PASS —— 原版游戏下载入口已接回" : "FAIL —— 请检查")}");
+        // 以磁盘上的最终文件为准（Cecil 重写会改变整体布局，内存里的 now 只是中间态）
+        byte[] finalBytes;
+        try { finalBytes = File.ReadAllBytes(path); } catch { finalBytes = now; }
+        int n = Math.Min(orig.Length, finalBytes.Length);
+        for (int i = 0; i < n; i++) if (orig[i] != finalBytes[i]) { diff++; if (i < lo) lo = i; if (i > hi) hi = i; }
+        Console.WriteLine($"    字节差异 : {diff} 处，区间 [0x{(hi >= 0 ? lo : 0):X}..0x{(hi >= 0 ? hi : 0):X}]，文件尺寸 {orig.Length:N0} -> {finalBytes.Length:N0}");
+        Console.WriteLine($"    结论 : {(allOk ? "PASS —— 原版游戏下载 + 整合包导入 入口均已接回" : "FAIL —— 请检查")}");
         return allOk ? 0 : 2;
     }
 
     // ---------------- 工具 ----------------
+    // 判断整合包解锁是否需要动手（只读，不写盘）
+    static bool NeedsModpackPatch(ModuleDefinition module, out bool entryKilled, out bool dispatchKilled)
+    {
+        entryKilled = dispatchKilled = false;
+        var t = module.GetType("PCL.ModModpack");
+        if (t == null) return false;
+
+        var entry = t.Methods.FirstOrDefault(m => m.Name == "ModpackInstall" && m.Parameters.Count == 0);
+        var full = t.Methods.FirstOrDefault(m => m.Name == "ModpackInstall" && m.Parameters.Count == 3);
+        if (entry == null || full == null) return false;
+
+        // 入口被替换：整段只有 newobj closure + Hint + ret，没有 RunInThread
+        if (entry.Body != null && !entry.Body.Instructions.Any(i =>
+                i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "RunInThread"))
+            entryKilled = true;
+
+        // 分派被替换：没有 switch，且含 kill 字符串
+        if (full.Body != null)
+        {
+            bool hasSwitch = full.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch);
+            bool hasKill = full.Body.Instructions.Any(i =>
+                i.OpCode == OpCodes.Ldstr && i.Operand is string s && s.Contains(KillHintA));
+            if (hasKill && !hasSwitch) dispatchKilled = true;
+        }
+        return entryKilled || dispatchKilled;
+    }
+
+    // 对已写出的 exe 做 Cecil 重写（原地：读 → 改 → 写临时 → 替换）
+    static string ApplyModpack(string exePath)
+    {
+        var tmpOut = exePath + ".cecil";
+        string depsDir = null;
+        try
+        {
+            using (var probe = ModuleDefinition.ReadModule(exePath))
+            {
+                depsDir = DepResolver.Extract(probe, out int n);
+                Console.WriteLine($"    已解出 {n} 个内嵌依赖用于元数据解析");
+            }
+
+            var resolver = new TolerantResolver(depsDir, Path.GetDirectoryName(exePath));
+            using var asm = AssemblyDefinition.ReadAssembly(exePath, new ReaderParameters
+            {
+                AssemblyResolver = resolver,
+                ReadingMode = ReadingMode.Deferred,
+                InMemory = true,
+            });
+
+            var outcome = ModpackPatch.Apply(asm.MainModule);
+            foreach (var n in outcome.Notes) Console.WriteLine("    · " + n);
+
+            if (!outcome.Changed)
+            {
+                Console.WriteLine("    整合包入口已是真实现，无需重写");
+                return null;
+            }
+
+            // 写回前先做悬空引用审计 —— 这类错误写进 exe 后会变成运行时崩溃
+            var mp = asm.MainModule.GetType("PCL.ModModpack");
+            var problems = new List<string>();
+            foreach (var name in new[] { "ModpackInstall" })
+                foreach (var md in mp.Methods.Where(x => x.Name == name))
+                    problems.AddRange(ModpackPatch.Audit(md));
+            if (problems.Count > 0)
+                throw new Exception("IL 审计未通过：" + string.Join("；", problems.Take(3)));
+
+            asm.Write(tmpOut, new WriterParameters { WriteSymbols = false });
+            Console.WriteLine($"    整合包解锁完成：{new FileInfo(exePath).Length:N0} → {new FileInfo(tmpOut).Length:N0} 字节");
+            File.Move(tmpOut, exePath, true);
+            return "整合包导入已解锁";
+        }
+        finally
+        {
+            try { if (File.Exists(tmpOut)) File.Delete(tmpOut); } catch { }
+            DepResolver.TryDelete(depsDir);
+        }
+    }
+
     static string AutoFindTarget()
     {
         // 本程序自身（用户可能把图标换成 PCL 后随手改名，务必排除）

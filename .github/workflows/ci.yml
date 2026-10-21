@@ -96,6 +96,20 @@ jobs:
           Check "not misjudged as GUI host" (-not (Test-Path "./artifacts/win-x64/PCL2补丁日志.txt")) "log file created => judged as GUI host"
           Check "chinese not mojibake"      ($r.Out -notmatch '\uFFFD') "U+FFFD found => encoding broken"
 
+          # 6b) 整合包解锁的自检逻辑必须存在（源码层面回归：防止后续改动把这条链丢掉）
+          #     真正的端到端验证需要 PCL2 本体，CI 里拿不到，因此只断言代码路径已编译进去。
+          $dll = (Get-ChildItem "./bin/Release/net8.0" -Filter "PCL2VanillaRestore.dll" -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).FullName
+          if ($dll) {
+            $asm = [System.Reflection.Assembly]::LoadFrom($dll)
+            $hasModpack = $null -ne $asm.GetType("ModpackPatch")
+            $hasDeps    = $null -ne $asm.GetType("DepResolver")
+            Check "modpack patch compiled in" $hasModpack "ModpackPatch type missing"
+            Check "dep resolver compiled in"  $hasDeps    "DepResolver type missing"
+          } else {
+            Write-Host "  SKIP  modpack patch types (build output not found)"
+          }
+
           # 7) 版本对齐：工具版本应与所支持的 PCL2 主版本一致
           $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe).Path)
           Check "tool version aligns PCL 2.99" ($vi.ProductVersion -like "2.99*") "ProductVersion=$($vi.ProductVersion)"

@@ -18,16 +18,16 @@
 
     <!-- 版本对齐 PCL2：前三段 = 所支持的 PCL2 版本（2.99.0），
          末位为工具自身修订号（加特性/修 bug 时递增），不影响适配的 PCL 版本 -->
-    <Version>2.99.0.2</Version>
+    <Version>2.99.0.3</Version>
     <AssemblyVersion>2.99.0.0</AssemblyVersion>
-    <FileVersion>2.99.0.2</FileVersion>
-    <InformationalVersion>2.99.0.2</InformationalVersion>
+    <FileVersion>2.99.0.3</FileVersion>
+    <InformationalVersion>2.99.0.3</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
 
     <Authors>NekoYume517</Authors>
     <Product>PCL2 Vanilla Download Restore Tool</Product>
-    <Description>Restore the "Download → Vanilla Game" entry point in Plain Craft Launcher 2 (PCL2) 2.99 by an equal-length IL patch.</Description>
+    <Description>Restore the "Download → Vanilla Game" and "Import Modpack" entry points in Plain Craft Launcher 2 (PCL2) 2.99.</Description>
     <Copyright>Copyright (c) 2026 NekoYume517</Copyright>
     <RepositoryUrl>https://github.com/NekoYume517/PCL2-Download-Tool</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

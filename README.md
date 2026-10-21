@@ -1,6 +1,6 @@
-# PCL2 原版游戏下载入口恢复工具
+# PCL2 下载入口恢复工具
 
-Restore the **"下载 → 原版游戏"** entry point in **Plain Craft Launcher 2 (PCL2) 2.99**.
+Restore the **「下载 → 原版游戏」** and **「导入整合包」** entry points in **Plain Craft Launcher 2 (PCL2) 2.99**.
 
 [![Release](https://img.shields.io/github/v/release/NekoYume517/PCL2-Download-Tool?label=release)](https://github.com/NekoYume517/PCL2-Download-Tool/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
@@ -11,20 +11,45 @@ Restore the **"下载 → 原版游戏"** entry point in **Plain Craft Launcher 
 
 ## 问题
 
-PCL2 2.99 打开「下载 → 原版游戏」只会报：
+PCL2 2.99 里两个入口都被关掉了，点进去只会报：
 
 > 为遵守相关法律法规，PCL 暂时不再提供 MC 下载功能，非常抱歉 qwq……
 
+1. **下载 → 原版游戏**：版本列表加载不出来
+2. **版本选择 → 导入整合包**：只弹一条提示，连选文件的框都不出
+
 ## 原因（一句话）
 
-被拆掉的**不是下载功能**，而是页面对加载器的**绑定**：`PageDownloadInstall.LoaderInit()`
-传给页面框架的 `RealLoader` 参数，被换成一个当场 `new` 出来的替身 `LoaderTask`（名字就叫
-`"关闭下载"`），它的唯一动作是 `throw`。真正的下载链——版本列表拉取、json / libraries /
-assets 下载——**一行都没删**，完好地躺在镜像里。
+被拆掉的**不是功能**，而是**入口对真实实现的绑定**：
 
-所以补丁只需要把「构造替身」那 48 字节 IL 换成一条 `ldsfld ModDownload::DlClientListLoader`。
+**原版游戏**：`PageDownloadInstall.LoaderInit()` 传给页面框架的 `RealLoader` 参数，被换成一个当场
+`new` 出来的替身 `LoaderTask`（名字就叫 `"关闭下载"`），唯一动作是 `throw`。真正的下载链——
+版本列表拉取、json / libraries / assets 下载——**一行都没删**。
+
+**导入整合包**：`ModModpack` 里有两道独立的锁：
+
+- `ModpackInstall()`（无参）整段被换成「弹一条 Hint 然后 return」，真实现是
+  `Dialogs.SelectFile` 选文件 → `RunInThread(ModpackInstall(File))`
+- `ModpackInstall(string,string,string)` 在解析完包类型之后无条件 `ldstr + newobj + throw`，
+  真实现是按 `PackType` 分派到 `InstallPack{CurseForge,HMCL,MMC,MCBBS,Modrinth,LauncherPack,Compress}`
+
+所以两道锁都得开——只开第一道，选完文件就会撞上第二道。
 
 完整逆向过程（IL 证据、地址、为何 `RestrictMcDownload` 改了没用）见 [ANALYSIS.md](ANALYSIS.md)。
+
+## 两种补法，各有理由
+
+| 入口 | 手法 | 原因 |
+| --- | --- | --- |
+| 原版游戏 | **等长字节替换**（48B → `ldsfld` + 43×`nop`） | 方法体长度不变 → codeSize / 分支偏移 / 异常处理边界 / 元数据全不动，最安全 |
+| 导入整合包 | **Cecil 重写元数据** | 要恢复「选文件 + 起线程」和「switch 分派」，方法体长度必然变化，没法等长 |
+
+Cecil 重写的老大难是 PCL 把 `PCLCS` / `MeloongCore` / `Newtonsoft.Json` 等依赖塞在
+`PCL.Resources.resources` 里、运行时才释放，写回时会 `AssemblyResolutionException`。
+本工具在重写前先把这些内嵌依赖解到临时目录喂给 `AssemblyResolver`，写完立即删除。
+
+重写后还会做**悬空引用审计**：任何跳转 / switch 目标 / 异常处理边界若指向已删除的指令就中止
+（这类错误写进 exe 后会变成运行时崩溃，不能只靠"能启动"判断）。
 
 ## 下载
 
@@ -35,7 +60,6 @@ assets 下载——**一行都没删**，完好地躺在镜像里。
 | `PCL2VanillaRestore-win-x64.zip` | 自包含单文件，**目标机无需安装 .NET**，推荐 |
 | `PCL2VanillaRestore-win-x86.zip` | 32 位 Windows 用 |
 | `PCL2VanillaRestore-portable.exe` | 需要已安装 .NET 8 运行时，体积小 |
-
 ## 用法
 
 ### 方式一：双击（推荐给不熟悉命令行的用户）
@@ -46,7 +70,7 @@ assets 下载——**一行都没删**，完好地躺在镜像里。
 
 1. 自动原地改写启动器（先把原件备份为 `*.bak.exe`）
 2. 弹窗提示修复结果
-3. 点「确定」后**自动启动 PCL2**，直接就能下载原版
+3. 点「确定」后**自动启动 PCL2** —— 原版下载和导入整合包同时可用
 
 **全程不出现任何命令行黑框**（程序是 GUI 子系统）。找不到本体时会弹窗说明，并给出文件选择框让你手动指认本体位置；选错文件也会提示并允许重选。程序图标沿用了 PCL2 本体的图标，在文件夹里一眼能认出来。
 
@@ -85,14 +109,14 @@ PCL2VanillaRestore.exe "Plain Craft Launcher 2.exe" --dry
 ### 输出示例
 
 ```
-PCL2 原版游戏下载入口恢复器 v2.99.0.2  （适配 PCL2 2.99.0.0）
+PCL2 原版游戏下载入口恢复器 v2.99.0.3  （适配 PCL2 2.99.0.0）
   目标 : D:\Downloads\Plain Craft Launcher 2.exe
-  输出 : D:\Downloads\Plain Craft Launcher 2 (fixed).exe
+  输出 : D:\Downloads\Plain Craft Launcher 2.exe   (原地修改，自动备份 .bak)
 
   SHA-256 : 6b6e1260cb5a1d6a303855f1c60cab3d0bc1aebba7e40a964180188b271e7386
   程序集  : Plain Craft Launcher 2 2.99.0.0  CLR v4.0.30319
 
-  发现 1 处入口替换：
+  发现 1 处「原版游戏下载」入口替换：
     · PageDownloadInstall::LoaderInit  (RVA 0x2DEB4)  替身名="关闭下载"
       段 IL_001A..IL_004A (48B)  -> ModDownload::DlClientListLoader
 
@@ -100,17 +124,28 @@ PCL2 原版游戏下载入口恢复器 v2.99.0.2  （适配 PCL2 2.99.0.0）
     桩方法 : System.Void PCL.PageDownloadInstall/_Closure$__::_Lambda$__3-0()  (3 条指令，仅 throw)
     真实字段 : PCL.ModDownload::DlClientListLoader  token=0x0400040F
     异常处理块 : 0 个（等长替换不影响其偏移）
-  ✓ PageDownloadInstall::LoaderInit  IL_001A 处 48B 已替换为 ldsfld DlClientListLoader + 43× nop
+  发现「导入整合包」入口被关闭：
+    · ModModpack::ModpackInstall()  —— 整段替换为只弹提示，真实现是「选文件 + 起线程安装」
+    · ModModpack::ModpackInstall(string,string,string)  —— 解析完包类型后无条件 throw，真实现是按类型分派
 
-  已写出 : D:\Downloads\Plain Craft Launcher 2 (fixed).exe  (5,980,160 字节)
+  ✓ PageDownloadInstall::LoaderInit  IL_001A 处 48B 已替换为 ldsfld DlClientListLoader + 43× nop
+  备份 : D:\Downloads\Plain Craft Launcher 2.bak.exe
+  正在解锁整合包导入（需重写元数据，可能稍慢）……
+    已解出 14 个内嵌依赖用于元数据解析
+    · kill 桩 IL_02DA 已替换为分派，重定向 16 处分支/异常边界
+    整合包解锁完成：5,980,160 → 5,975,040 字节
+
+  已写出 : D:\Downloads\Plain Craft Launcher 2.exe  (5,975,040 字节)
 
   —— 回读自检 ——
-    ✓ PageDownloadInstall::LoaderInit  codeSize=94B(不变)  ldsfld=[DlClientListLoader]
-    字节差异 : 41 处，区间 [0x2C0DA..0x2C109]，文件尺寸 5980160 -> 5980160
-    结论 : PASS —— 原版游戏下载入口已接回
+    ✓ PageDownloadInstall::LoaderInit  codeSize=94B(不变)  ldstr=[]  ldsfld=[DlClientListLoader]
+    ✓ 整合包入口 ModpackInstall()  codeSize=94B  含 RunInThread=True
+    ✓ 整合包分派 ModpackInstall(3参)  codeSize=895B  含 switch=True
+    字节差异 : 5689476 处，区间 [0x97..0x5B2BFF]，文件尺寸 5,980,160 -> 5,975,040
+    结论 : PASS —— 原版游戏下载 + 整合包导入 入口均已接回
 ```
 
-## 为什么是「等长」替换
+## 原版下载为什么走「等长」
 
 补丁把 48 字节的替身构造段换成 `ldsfld`（5 字节）+ `nop × 43`，**总长度不变**。这样：
 
@@ -118,20 +153,37 @@ PCL2 原版游戏下载入口恢复器 v2.99.0.2  （适配 PCL2 2.99.0.0）
 2. 所有分支目标偏移不变（工具会校验段内无段外跳入的分支）
 3. 元数据表、文件尺寸、其余全部指令**一个字节都不动**
 
-第 3 点尤其关键。PCL2 把 `PCLCS`、`MeloongCore`、`Newtonsoft.Json` 等依赖全部内嵌在 exe 的
-4.2 MB 资源里（运行时才释放到磁盘）。如果用 Mono.Cecil 重写整个方法体，就会触发元数据重建，
-然后立刻死在 `Failed to resolve assembly: 'PCLCS'` 上。等长字节手术完全绕开元数据重写，
-Cecil 在这里**只用于读取和定位**。
+这条路径上 Cecil 只用于读取和定位，**不参与写盘**，所以最稳。
+
+## 整合包为什么必须走 Cecil 重写
+
+要恢复的两段真实现（选文件 + 起线程 / switch 分派）都比被替换掉的替身**长得多**，
+等长替换不可能。于是必须重写元数据，而 PCL2 把 `PCLCS`、`MeloongCore`、`Newtonsoft.Json`
+等依赖全部内嵌在 exe 的 4.2 MB 资源里（运行时才释放到磁盘），直接写回会立刻死在
+`Failed to resolve assembly: 'PCLCS'`。
+
+解决办法：写回前先从 `PCL.Resources.resources` 把内嵌程序集解到临时目录（实测 14 个），
+喂给 Cecil 的 `AssemblyResolver`，写完立即删掉临时目录。**解出的依赖不会留在用户机器上。**
+
+### 分支 / 异常边界的坑
+
+被删掉的那条 `ldstr` 不只是普通指令——它同时是 `try` 正常结束的 `leave` 目标和外层
+`catch` 的 `HandlerEnd`。直接 `Remove` 会留下悬空引用，exe 能启动、但一走到对应路径就崩。
+工具会把**所有指向它的分支、switch 目标、四个异常处理边界**统一改指向新的分派入口
+（本次实测重定向 16 处），再删除原指令。
+
+写盘后还有一道**悬空引用审计**：任何跳转 / switch 目标 / 异常处理边界若指向已删除的指令，
+立即中止并报错，不写出文件。
 
 ## 版本策略
 
 **工具版本号前三段 = 其所适配的 PCL2 版本号**，末位是工具自身修订号（加特性 / 修 bug 时递增，
-不影响适配的 PCL 版本）。例如 `2.99.0.2` 表示「适配 PCL2 2.99.0 的第 2 次修订」。
+不影响适配的 PCL 版本）。例如 `2.99.0.3` 表示「适配 PCL2 2.99.0 的第 3 次修订」。
 
 工具启动时会打印适配版本，并在运行时校验目标：
 
 ```
-PCL2 原版游戏下载入口恢复器 v2.99.0.2  （适配 PCL2 2.99.0.0）
+PCL2 原版游戏下载入口恢复器 v2.99.0.3  （适配 PCL2 2.99.0.0）
   程序集  : Plain Craft Launcher 2 2.99.0.0  CLR v4.0.30319
 ```
 
@@ -151,12 +203,15 @@ PCL2 原版游戏下载入口恢复器 v2.99.0.2  （适配 PCL2 2.99.0.0）
    （打分偏好 `DlClientListLoader` / 含 `Main` 的主加载器，压低具体源子加载器）
 5. 校验分支与异常块边界 → 等长替换 → 回读自检
 
-带**幂等检测**：对已修复的文件再跑一次，会提示「已直接引用 DlClientListLoader，无需修改」。
+整合包那两处同样不硬编码：入口按「有没有调用 `ModBase.RunInThread`」判定，分派按
+「有没有 `switch` 且还带 kill 字符串」判定。
+
+带**幂等检测**：对已修复的文件再跑一次，会提示入口已是真实现、无需修改。
 
 ## 已知边界
 
-- **不恢复整合包安装**。`ModModpack.ModpackInstall` 的两个重载是另一条独立的被拆路径
-  （拖 zip 进主窗口 / 安装 `.mrpack`），和「原版游戏下载」不是一回事。需要的话可以加规则。
+- 整合包解锁**只针对 2.99 这一版的 kill 形态**（两道锁）。若上游改了结构，工具会打印
+  「未找到 kill 桩」并跳过，不会写出半成品。
 - **PCL 自动更新会覆盖回原版**，更新后重跑一次工具即可。
 - 目标 exe 本来就没有数字签名，修改后不影响运行；若被 SmartScreen / 杀软拦，选「仍要运行」。
 - 若启动器装在受保护目录（如 `C:\Program Files`），请手动「以管理员身份运行」本工具。
@@ -169,7 +224,7 @@ dotnet publish -c Release -r win-x64 --self-contained true \
   -p:EnableCompressionInSingleFile=true -o ./artifacts
 ```
 
-唯一 NuGet 依赖：[`Mono.Cecil` 0.11.6](https://www.nuget.org/packages/Mono.Cecil)（仅读取）。
+唯一 NuGet 依赖：[`Mono.Cecil` 0.11.6](https://www.nuget.org/packages/Mono.Cecil)。
 推送 tag 会自动触发 [Release workflow](.github/workflows/release.yml) 构建并发布。
 
 ## License
