@@ -135,6 +135,63 @@ jobs:
           # 落到脚本末尾会把 $LASTEXITCODE 当作步骤退出码。
           exit 0
 
+      # 关键回归：整合包解锁依赖 Cecil 写回，而 Cecil 写回需要为目标程序集方法签名中的
+      # .NET Framework 枚举（如 ThreadPriority）生成参数常量 —— 这一步要求 resolver
+      # 能看见 mscorlib / System.Threading。自包含单文件发布时进程目录里没有这些 dll，
+      # 于是只有**发布产物**才会抛 `Failed to resolve System.Threading.ThreadPriority`，
+      # 普通 dotnet build 完全不暴露。
+      # --selftest-cecil 对任意托管程序集做一次读→写往返，正好覆盖这条路径。
+      - name: Cecil write-back regression (self-contained publish)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $exe = "./artifacts/win-x64/PCL2VanillaRestore.exe"
+          $work = Join-Path $env:RUNNER_TEMP "cecil_rt"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+          # fixture：.NET Framework 程序集，方法签名带 ThreadPriority 默认值，
+          # 这样 Cecil 写回时必然要解析该枚举所在的程序集。
+          $src = Join-Path $work "fake"
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>WinExe</OutputType>
+              <TargetFramework>net48</TargetFramework>
+              <AssemblyName>Plain Craft Launcher 2</AssemblyName>
+              <UseWindowsForms>true</UseWindowsForms>
+            </PropertyGroup>
+          </Project>
+          '@ | Set-Content (Join-Path $src "fake.csproj") -Encoding UTF8
+          @'
+          using System.Threading;
+          public static class Probe {
+              public static void Take(ThreadPriority p = ThreadPriority.Normal) { }
+              [System.STAThread]
+              public static void Main() { }
+          }
+          '@ | Set-Content (Join-Path $src "Probe.cs") -Encoding UTF8
+
+          Push-Location $src
+          dotnet build -c Release -v q --nologo 2>&1 | Out-Null
+          Pop-Location
+
+          $fake = Get-ChildItem $src -Recurse -Filter "Plain Craft Launcher 2.exe" |
+                  Select-Object -First 1
+          if (-not $fake) { Write-Host "  SKIP  cecil regression (cannot build net48 fixture)"; exit 0 }
+
+          $o = & $exe $fake.FullName --selftest-cecil 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $o
+          if ($code -eq 0 -and $o -match "Cecil 往返写成功") {
+            Write-Host "  PASS  cecil resolver sees framework assemblies"
+          } else {
+            Write-Host "  FAIL  cecil roundtrip (exit $code)"
+            exit 1
+          }
+          exit 0
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

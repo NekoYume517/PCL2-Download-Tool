@@ -60,12 +60,29 @@ static class DepResolver
 
 // 只在无法解析时才被调用；Cecil 写回只需要 AssemblyNameReference，
 // 不需要真实的类型定义。
+//
+// 注意：Cecil 写回时还会为「带默认值的参数」解析其常量类型（MetadataBuilder.GetConstantType），
+// 而 PCL 的方法签名里有 `ThreadPriority` 这类 mscorlib 枚举。目标 exe 是 .NET Framework 程序集，
+// 所以必须让 resolver 能看见 .NET Framework 的 mscorlib —— 否则会抛
+// `Failed to resolve System.Threading.ThreadPriority`。
+// 自包含单文件发布时进程目录里没有 mscorlib.dll，这个坑只有在发布产物上才暴露。
 sealed class TolerantResolver : DefaultAssemblyResolver
 {
+    static readonly string[] FrameworkDirs =
+    {
+        @"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8",
+        @"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2",
+        @"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.6.1",
+        @"C:\Windows\Microsoft.NET\Framework64\v4.0.30319",
+        @"C:\Windows\Microsoft.NET\Framework\v4.0.30319",
+    };
+
     public TolerantResolver(string depsDir, string exeDir)
     {
         foreach (var d in new[] { depsDir, exeDir })
             if (!string.IsNullOrEmpty(d) && Directory.Exists(d)) AddSearchDirectory(d);
+        foreach (var d in FrameworkDirs)
+            if (Directory.Exists(d)) AddSearchDirectory(d);
     }
 
     public override AssemblyDefinition Resolve(AssemblyNameReference name)

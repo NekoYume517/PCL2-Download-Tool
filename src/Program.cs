@@ -296,6 +296,7 @@ static class PclVanillaRestore
 
         string target = null, outPath = null;
         bool inPlace = false, dry = false, wantHelp = false;
+        bool selftestCecil = false;
         _noLaunch = args.Contains("--no-launch");
         bool? forceAuto = args.Contains("--auto") ? true : (args.Contains("--no-auto") ? false : (bool?)null);
         _quiet = args.Contains("--quiet");
@@ -315,6 +316,15 @@ static class PclVanillaRestore
                 case "--quiet": break;
                 case "-h": case "--help": wantHelp = true; break;
                 case "-o": case "--out": outPath = i + 1 < args.Length ? args[++i] : null; break;
+                case "--selftest-cecil":
+                    // 隐藏诊断开关：对任意托管程序集做一次 Cecil 读→写往返，
+                    // 用来验证 AssemblyResolver 能否解析框架程序集。
+                    // 存在的理由：Cecil 写回时要为「带默认值的参数」解析常量类型
+                    // （MetadataBuilder.GetConstantType），而自包含单文件发布时
+                    // 进程目录里没有 mscorlib.dll —— 这个坑只在发布产物上暴露，
+                    // 普通 dotnet build 与常规路径都碰不到。CI 用它做回归。
+                    selftestCecil = true;
+                    break;
                 default:
                     if (target == null && (File.Exists(args[i]) || args[i].EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
                         target = args[i];
@@ -334,6 +344,16 @@ static class PclVanillaRestore
             PrintUsage();
             if (_isGuiHost) InfoBox(UsageText(), "用法说明");
             return 0;
+        }
+
+        if (selftestCecil)
+        {
+            if (target == null || !File.Exists(target))
+            {
+                Console.WriteLine("  --selftest-cecil 需要一个托管程序集路径");
+                return 3;
+            }
+            return CecilRoundtripSelfTest(target);
         }
 
         if (autoMode)
@@ -875,6 +895,44 @@ static class PclVanillaRestore
     }
 
     // ---------------- 工具 ----------------
+    // 隐藏自检：对任意托管程序集做一次 Cecil 读→写往返。
+    // 唯一目的是验证 TolerantResolver 能解析到 .NET Framework 程序集 ——
+    // Cecil 写回时为「带默认值的参数」解析常量类型会需要 mscorlib / System.Threading 等，
+    // 而自包含单文件发布时进程目录里没有这些 dll。此路径一旦坏掉，整合包解锁必然失败，
+    // 且只有发布产物能测出来。
+    static int CecilRoundtripSelfTest(string asmPath)
+    {
+        var tmp = asmPath + ".cecil-selftest";
+        string depsDir = null;
+        try
+        {
+            using (var probe = ModuleDefinition.ReadModule(asmPath))
+                depsDir = DepResolver.Extract(probe, out int n);
+
+            var resolver = new TolerantResolver(depsDir, Path.GetDirectoryName(asmPath));
+            using var asm = AssemblyDefinition.ReadAssembly(asmPath, new ReaderParameters
+            {
+                AssemblyResolver = resolver,
+                ReadingMode = ReadingMode.Deferred,
+                InMemory = true,
+            });
+            asm.Write(tmp, new WriterParameters { WriteSymbols = false });
+            var len = new FileInfo(tmp).Length;
+            Console.WriteLine($"  ✓ Cecil 往返写成功：{asmPath} → {len:N0} 字节");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  ✗ Cecil 往返写失败：{ex.GetType().Name}: {ex.Message}");
+            return 2;
+        }
+        finally
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            DepResolver.TryDelete(depsDir);
+        }
+    }
+
     // 判断整合包解锁是否需要动手（只读，不写盘）
     static bool NeedsModpackPatch(ModuleDefinition module, out bool entryKilled, out bool dispatchKilled)
     {
