@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe：GUI 子系统，双击不出现任何控制台黑框。
+         命令行仍可用（从 cmd/PowerShell 调用时手动 AttachConsole 接回输出）。 -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -16,10 +18,10 @@
 
     <!-- 版本对齐 PCL2：前三段 = 所支持的 PCL2 版本（2.99.0），
          末位为工具自身修订号（加特性/修 bug 时递增），不影响适配的 PCL 版本 -->
-    <Version>2.99.0.1</Version>
+    <Version>2.99.0.2</Version>
     <AssemblyVersion>2.99.0.0</AssemblyVersion>
-    <FileVersion>2.99.0.1</FileVersion>
-    <InformationalVersion>2.99.0.1</InformationalVersion>
+    <FileVersion>2.99.0.2</FileVersion>
+    <InformationalVersion>2.99.0.2</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
 

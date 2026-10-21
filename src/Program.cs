@@ -67,11 +67,144 @@ static class PclVanillaRestore
     static void Log(string s) { if (!_quiet) Console.WriteLine(s); }
     static void Warn(string s) { if (!_quiet) Console.WriteLine("  ! " + s); }
 
+    // ---------- 输出路由 ----------
+    // WinExe（GUI 子系统）下没有控制台：Console 调用会**静默丢弃**，
+    // 而且 Console.IsOutputRedirected 会变成 true —— 若直接据此判定"非交互"，
+    // 双击时弹窗和启动都会被跳过（表现为"双击没反应"）。
+    // 因此显式区分三种宿主：CLI 控制台 / 双击 GUI / 重定向（CI、管道）。
+    static bool _isGuiHost;          // 无控制台窗口（WinExe 双击）
+    static string _logPath;          // GUI 模式下的诊断日志路径
+    static bool _redirectedAtStart;  // 启动瞬间的重定向状态（CI / 管道 / 计划任务）
+    static bool _feedbackGiven;      // 本轮是否已给用户可见反馈（弹窗）
+
+    static void InitOutput()
+    {
+        // WinExe 启动时不带控制台。若从 cmd / PowerShell 调用，接回父控制台并重建
+        // 输出流，命令行输出才不会凭空消失。
+        bool attached = false;
+        if (GetConsoleWindow() == IntPtr.Zero)
+        {
+            try { attached = AttachConsole(ATTACH_PARENT_PROCESS); } catch { }
+            if (attached)
+            {
+                try
+                {
+                    // 接回后 .NET 缓存的默认句柄仍无效，必须用标准句柄重建 Writer。
+                    // 关键：WinExe 启动时无控制台，.NET 缓存的 OutputEncoding 与控制台
+                    // 实际代码页(GBK/936)不一致，直接写会乱码（实测 UTF-8 字节被按 GBK
+                    // 渲染成「PCL2 ԭ...」）。先把控制台输出代码页显式切到 UTF-8。
+                    // 用 UTF8Encoding(false) 避免 .NET 向控制台吐出 BOM。
+                    try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+                    var enc = Console.OutputEncoding;
+                    Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), enc) { AutoFlush = true });
+                    Console.SetError(new StreamWriter(Console.OpenStandardError(), enc) { AutoFlush = true });
+                }
+                catch { }
+            }
+        }
+
+        bool hasConsole = HasConsole() || attached;
+        _redirectedAtStart = SafeRedirected();
+
+        // 关键判定：WinExe 双击时**没有**控制台，Console.IsOutputRedirected 本身就是 true，
+        // 拿它区分 CI 会把「双击」误判成「CI」，自动模式直接不启用 —— 表现为"双击没反应"。
+        // 可靠的区分方式是标准输出句柄是否真实存在：
+        //   被管道/文件重定向（CI、cmd 重定向） => 句柄有效，类型 PIPE/DISK
+        //   双击桌面（无任何控制台与句柄）      => 句柄为 NULL/INVALID，类型 UNKNOWN
+        _isGuiHost = !hasConsole && !HasRealStdHandle();
+
+        if (_isGuiHost)
+        {
+            // 双击：Console 输出会被系统直接丢弃。单点解决 —— 把 Out/Error 重定向到
+            // 日志文件，现有 70+ 处 Console.WriteLine 无需改动即可留档。
+            try
+            {
+                _logPath = Path.Combine(AppContext.BaseDirectory, "PCL2补丁日志.txt");
+                var w = new StreamWriter(new FileStream(_logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite),
+                                         new UTF8Encoding(false)) { AutoFlush = true };
+                Console.SetOut(w);
+                Console.SetError(w);
+            }
+            catch { _logPath = null; }
+        }
+        else if (!attached)
+        {
+            // 非 GUI 但也没接上控制台（典型：CI / 管道重定向，stdout 是管道）：
+            // WinExe 的默认输出编码是系统 ANSI(GBK)，必须显式切到 UTF-8，
+            // 否则中文按 GBK 写出、宿主按 UTF-8 解码 => 全乱码（已实测）。
+            // 注意：OutputEncoding 的 setter 在管道场景可能抛异常，
+            // 必须与重建 Writer 分开 try，否则会中断后者、UTF-8 从未生效。
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+            try
+            {
+                var enc = new UTF8Encoding(false);
+                Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), enc) { AutoFlush = true });
+                Console.SetError(new StreamWriter(Console.OpenStandardError(), enc) { AutoFlush = true });
+            }
+            catch { }
+        }
+    }
+
+    const int STD_OUTPUT_HANDLE = -11;
+    const int FILE_TYPE_UNKNOWN = 0x0000;
+    const int FILE_TYPE_PIPE = 0x0003;
+    const int FILE_TYPE_DISK = 0x0001;
+    const int FILE_TYPE_CHAR = 0x0002;
+
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll")] static extern uint GetFileType(IntPtr h);
+
+    /// 标准输出是否指向一个真实可写的句柄（管道 / 文件 / 控制台）。
+    static bool HasRealStdHandle()
+    {
+        try
+        {
+            var h = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (h == IntPtr.Zero || h == new IntPtr(-1) || h == new IntPtr(-2)) return false;
+            uint t = GetFileType(h);
+            return t == FILE_TYPE_PIPE || t == FILE_TYPE_DISK || t == FILE_TYPE_CHAR;
+        }
+        catch { return false; }
+    }
+
+    static bool SafeRedirected()
+    {
+        try { return Console.IsOutputRedirected || Console.IsErrorRedirected; }
+        catch { return true; }
+    }
+
+    /// CI / 服务环境判定：环境变量是确定性的，不依赖控制台状态。
+    static bool IsCiEnvironment()
+    {
+        foreach (var v in new[] { "GITHUB_ACTIONS", "CI", "TF_BUILD", "JENKINS_URL", "TEAMCITY_VERSION" })
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(v))) return true;
+        return false;
+    }
+
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+
+    const int ATTACH_PARENT_PROCESS = 0;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AttachConsole(int dwFlags);
+
+    static bool HasConsole()
+    {
+        try { return GetConsoleWindow() != IntPtr.Zero; }
+        catch { return false; }
+    }
+
+    /// 面向用户的输出。GUI 宿主下 Console.Out 已指向日志文件，两者行为一致。
+    static void Out(string s) => Console.WriteLine(s);
+
     static int Main(string[] args)
     {
         try
         {
-            return Run(args);
+            InitOutput();
+            int code = Run(args);
+            EnsureFeedback(code);
+            return code;
         }
         catch (Exception ex)
         {
@@ -79,32 +212,83 @@ static class PclVanillaRestore
             // 注意：这里**不能**用 `is Mono.Cecil.XXX` 之类的类型判断 —— 那会让 JIT 在
             // 编译 Main 时就解析 Cecil 程序集；若它缺失，异常会在 try 建立之前抛出，
             // 顶层保护反而失效（实测为未捕获的 FileNotFoundException）。只比对类型名。
-            Console.WriteLine($"  ✗ 失败：{ex.Message}");
             string tn = ex.GetType().FullName ?? "";
-            if (tn.StartsWith("Mono.Cecil.AssemblyResolutionException", StringComparison.Ordinal)
+            bool notManaged = tn.StartsWith("Mono.Cecil.AssemblyResolutionException", StringComparison.Ordinal)
                 || tn.StartsWith("Mono.Cecil.ImageNotExecutableException", StringComparison.Ordinal)
-                || tn.IndexOf("BadImageFormat", StringComparison.OrdinalIgnoreCase) >= 0)
-                Console.WriteLine("    （目标不是可独立分析的托管程序集，或其依赖无法解析）");
+                || tn.IndexOf("BadImageFormat", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            Out($"  ✗ 失败：{ex.Message}");
+            if (notManaged) Out("    （目标不是可独立分析的托管程序集，或其依赖无法解析）");
+
+            _feedbackGiven = false;                     // 走兜底弹窗
+            EnsureFeedback(5, ex.Message);
             return 5;
         }
     }
 
+    /// 无控制台宿主（双击 / 拖放）下，任何路径都必须给用户一个可见结果，
+    /// 否则表现为"双击没反应"。控制台宿主无需处理。
+    static void EnsureFeedback(int code, string detail = null)
+    {
+        if (!_isGuiHost || _feedbackGiven) return;
+        string log = _logPath != null ? "\n\n详细日志：\n" + _logPath : "";
+        string msg = code switch
+        {
+            0 => "处理完成。" + log,
+            3 => "没有在同目录找到 PCL2 本体，也未选择文件。\n\n" +
+                 "请把本补丁和 Plain Craft Launcher 2.exe 放在同一个文件夹后重试。" + log,
+            4 => "选中的文件不是 PCL2 本体，已中止，未做任何修改。" + log,
+            5 => "处理失败：\n" + (detail ?? "未知错误") + log,
+            _ => "补丁已写出，但回读自检未通过（退出码 " + code + "）。\n\n" +
+                 "请勿使用该文件，原件已备份为 .bak.exe。" + log,
+        };
+        InfoBox(msg, code == 0 ? "完成" : "未生效",
+                code == 0 ? Native.MB_ICONINFORMATION : Native.MB_ICONERROR);
+    }
+
+    /// 目标启动器是否正在运行。PCL2 运行时其 exe 被自己锁定，
+    /// 原地改写会抛 IOException —— 这是"黑框一闪就没"的典型成因，必须提前给出可读提示。
+    static bool IsPclRunningOn(string exePath)
+    {
+        try
+        {
+            string full = System.IO.Path.GetFullPath(exePath);
+            string wantName = System.IO.Path.GetFileNameWithoutExtension(full);
+            foreach (var pr in Process.GetProcesses())
+            {
+                try
+                {
+                    // 先按进程名粗筛，避免对每个进程访问 MainModule（跨架构/权限会抛）
+                    if (!string.Equals(pr.ProcessName, wantName, StringComparison.OrdinalIgnoreCase)) continue;
+                    string p;
+                    try { p = pr.MainModule?.FileName; } catch { continue; }   // 权限/位数不符则跳过
+                    if (!string.IsNullOrEmpty(p)
+                        && string.Equals(p, full, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                catch { }
+                finally { try { pr.Dispose(); } catch { } }
+            }
+        }
+        catch { }
+        return false;
+    }
+
     static int Run(string[] args)
     {
-        Console.OutputEncoding = Encoding.UTF8;
+        // 仅在有真实控制台时设置代码页；GUI 宿主下 Out 已指向文件流，
+        // 设置 OutputEncoding 会抛 IOException（句柄无效）。
+        if (!_isGuiHost) { try { Console.OutputEncoding = Encoding.UTF8; } catch { } }
+
         string target = null, outPath = null;
-        bool inPlace = false, dry = false;
+        bool inPlace = false, dry = false, wantHelp = false;
         _noLaunch = args.Contains("--no-launch");
         bool? forceAuto = args.Contains("--auto") ? true : (args.Contains("--no-auto") ? false : (bool?)null);
         _quiet = args.Contains("--quiet");
 
-        // 双击（无参数）且处于交互桌面环境 => 自动模式：原地修改 + 备份 + 启动 PCL2。
-        // 输出被重定向时（CI、管道、计划任务）不进入自动模式，避免弹窗挂死。
-        bool autoMode = forceAuto ?? (args.Length == 0 && IsInteractiveDesktop());
-
         // banner 先于参数解析打印，确保 --help / 无目标 时也带着版本信息
         Console.WriteLine($"PCL2 原版游戏下载入口恢复器 v{ToolVersion()}  （适配 PCL2 {SupportedPclVersion}）");
 
+        int positional = 0;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -114,13 +298,27 @@ static class PclVanillaRestore
                 case "--no-launch": _noLaunch = true; break;
                 case "--auto": case "--no-auto": break;   // 已在上面解析
                 case "--quiet": break;
-                case "-h": case "--help": PrintUsage(); return 0;
+                case "-h": case "--help": wantHelp = true; break;
                 case "-o": case "--out": outPath = i + 1 < args.Length ? args[++i] : null; break;
                 default:
                     if (target == null && (File.Exists(args[i]) || args[i].EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
                         target = args[i];
+                    positional++;
                     break;
             }
+        }
+
+        // 自动模式：双击（无参数）或把本体拖到图标上（仅一个位置参数），且处于交互桌面。
+        // CI / 服务 / 管道重定向下不进入自动模式，避免弹窗挂死。
+        // 注意 WinExe 下拖放也走这里 —— 没有控制台，必须靠弹窗给反馈。
+        bool looksLikeDragDrop = positional == 1 && target != null && !wantHelp;
+        bool autoMode = forceAuto ?? ((args.Length == 0 || looksLikeDragDrop) && IsInteractiveDesktop());
+
+        if (wantHelp)
+        {
+            PrintUsage();
+            if (_isGuiHost) InfoBox(UsageText(), "用法说明");
+            return 0;
         }
 
         if (autoMode)
@@ -278,6 +476,18 @@ static class PclVanillaRestore
 
         if (patched == 0) { Console.WriteLine("  没有可应用的补丁"); PauseIfInteractive(); return 2; }
 
+        // 启动器正在运行时其 exe 被自身锁定，原地写盘必然抛 IOException。
+        // 旧版在这里直接崩掉、只往控制台写了一行就退出 —— 双击时表现为"黑框一闪就没"。
+        if (IsPclRunningOn(target))
+        {
+            Console.WriteLine("  ✗ 检测到 PCL2 正在运行，其文件被占用，无法改写。");
+            InfoBox("PCL2 正在运行，文件被占用，无法完成修复。\n\n" +
+                    "请先完全退出 PCL2，然后再次双击本补丁。",
+                    "请先关闭 PCL2", Native.MB_ICONWARNING);
+            PauseIfInteractive();
+            return 6;
+        }
+
         // ================= 3. 备份 + 写盘 =================
         if (inPlace)
         {
@@ -286,8 +496,23 @@ static class PclVanillaRestore
             Console.WriteLine($"  备份 : {bak}");
         }
         var tmp = outPath + ".tmp";
-        File.WriteAllBytes(tmp, outBuf);
-        File.Move(tmp, outPath, true);
+        try
+        {
+            File.WriteAllBytes(tmp, outBuf);
+            File.Move(tmp, outPath, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("  ✗ 写盘失败：" + ex.Message);
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            InfoBox("补丁内容已生成，但写入文件失败：\n" + ex.Message + "\n\n" +
+                    "常见原因：PCL2 正在运行、文件被安全软件占用、或所在目录需要管理员权限\n" +
+                    "（可把补丁和启动器一起移到桌面等可写目录，或右键「以管理员身份运行」）。" +
+                    (_logPath != null ? "\n\n详细日志：\n" + _logPath : ""),
+                    "写入失败", Native.MB_ICONERROR);
+            PauseIfInteractive();
+            return 7;
+        }
         Console.WriteLine($"\n  已写出 : {outPath}  ({new FileInfo(outPath).Length:N0} 字节)");
 
         // ================= 4. 回读自检 =================
@@ -328,20 +553,32 @@ static class PclVanillaRestore
         return rc;
     }
 
+    static string UsageText()
+    {
+        return
+            "用法：PCL2VanillaRestore.exe [选项] \"Plain Craft Launcher 2.exe\"\n" +
+            "      最简单的方式：把本程序和启动器放在同一个文件夹，直接双击本程序。\n" +
+            "      也可以把启动器 exe 拖到本程序图标上。\n" +
+            "\n" +
+            "选项：\n" +
+            "  --auto / --no-auto  强制开启 / 关闭自动模式（默认：双击或拖放时开启）\n" +
+            "  --in-place          原地修改（自动备份为 *.bak.exe）；默认输出 \"xxx (fixed).exe\"\n" +
+            "  --no-launch         修复后不自动启动 PCL2\n" +
+            "  --dry               只分析并打印将要做的修改，不写盘\n" +
+            "  -o, --out <路径>    指定输出文件\n" +
+            "  --quiet             精简输出\n" +
+            "  -h, --help          显示本帮助\n" +
+            "\n" +
+            "退出码：0 成功/无需修改 · 2 自检未通过 · 3 未找到目标文件\n" +
+            "        4 目标不是 Plain Craft Launcher 2 · 5 分析失败（非托管 exe 等）\n" +
+            "        6 PCL2 正在运行（文件被占用） · 7 写盘失败（权限/占用）\n" +
+            "\n" +
+            "提示：修复前请先完全退出 PCL2，否则文件被占用无法改写。";
+    }
+
     static void PrintUsage()
     {
-        Console.WriteLine("用法：PCL2VanillaRestore.exe [选项] \"Plain Craft Launcher 2.exe\"");
-        Console.WriteLine("      也可直接把启动器 exe 拖到本程序图标上，或与本程序同目录后双击运行。");
-        Console.WriteLine();
-        Console.WriteLine("选项：");
-        Console.WriteLine("  --in-place      原地修改（自动备份为 *.bak.exe）；默认输出 \"xxx (fixed).exe\"");
-        Console.WriteLine("  -o, --out <路径> 指定输出文件");
-        Console.WriteLine("  --dry           只分析并打印将要做的修改，不写盘");
-        Console.WriteLine("  --quiet         精简输出");
-        Console.WriteLine("  -h, --help      显示本帮助");
-        Console.WriteLine();
-        Console.WriteLine("退出码：0 成功/无需修改 · 2 自检未通过 · 3 未找到目标文件");
-        Console.WriteLine("        4 目标不是 Plain Craft Launcher 2 · 5 分析失败（非托管 exe 等）");
+        foreach (var line in UsageText().Split('\n')) Console.WriteLine(line.TrimEnd('\r'));
     }
 
     // ---------------- 站点发现 ----------------
@@ -558,19 +795,32 @@ static class PclVanillaRestore
         // 本程序自身（用户可能把图标换成 PCL 后随手改名，务必排除）
         string self = Environment.ProcessPath;
 
-        bool IsPclNamed(string f) =>
-            f.IndexOf("Plain Craft Launcher", StringComparison.OrdinalIgnoreCase) >= 0
-            || f.IndexOf("PCL", StringComparison.OrdinalIgnoreCase) >= 0;
+        // 只认 PCL2 的典型文件名；不要用宽泛的 "PCL" 子串，
+        // 否则会误选到本工具自己或别的第三方程序，表现为"双击没反应"。
+        bool LooksLikePcl(string f)
+        {
+            var n = Path.GetFileNameWithoutExtension(f);
+            return n.IndexOf("Plain Craft Launcher", StringComparison.OrdinalIgnoreCase) >= 0
+                || n.Equals("PCL2", StringComparison.OrdinalIgnoreCase)
+                || n.StartsWith("PCL2 ", StringComparison.OrdinalIgnoreCase)
+                || n.StartsWith("PCL_", StringComparison.OrdinalIgnoreCase)
+                || n.Equals("PCL", StringComparison.OrdinalIgnoreCase);
+        }
 
-        foreach (var dir in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        foreach (var dir in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
-            var exes = Directory.EnumerateFiles(dir, "*.exe")
-                .Where(f => !IsSelf(f, self))
-                .Where(IsPclNamed)
-                .ToList();
+            List<string> exes;
+            try
+            {
+                exes = Directory.EnumerateFiles(dir, "*.exe")
+                    .Where(f => !IsSelf(f, self))
+                    .Where(LooksLikePcl)
+                    .ToList();
+            }
+            catch { continue; }
 
-            // 1) 未处理过的本体
+            // 1) 未处理过的本体优先
             var hit = exes.FirstOrDefault(f =>
                 !f.Contains("(fixed)", StringComparison.OrdinalIgnoreCase)
                 && !f.EndsWith(".bak.exe", StringComparison.OrdinalIgnoreCase));
@@ -640,19 +890,24 @@ static class PclVanillaRestore
         public const uint OFN_FILEMUSTEXIST = 0x1000, OFN_PATHMUSTEXIST = 0x800, OFN_HIDEREADONLY = 0x4;
     }
 
+    /// 是否处于可交互桌面。
+    /// 关键：WinExe 下 Console.IsOutputRedirected 恒为 true，**不能**用它判定非交互
+    /// （否则双击时弹窗与启动全被跳过，表现为"双击没反应"）。
+    /// 改为：CI/服务用环境变量确定性识别；GUI 宿主视为交互；控制台宿主看是否被管道重定向。
     static bool IsInteractiveDesktop()
     {
         try
         {
-            // 输出被重定向（CI / 管道 / 计划任务）时不进入自动模式，避免弹窗挂死
-            if (Console.IsOutputRedirected || Console.IsErrorRedirected) return false;
-            return Environment.UserInteractive;
+            if (IsCiEnvironment()) return false;
+            if (!Environment.UserInteractive) return false;
+            if (_isGuiHost) return true;              // 双击桌面，有窗口站
+            return !_redirectedAtStart;               // 控制台：被管道/重定向则非交互
         }
         catch { return false; }
     }
 
     /// 弹模态提示框。**仅在真正可交互的桌面环境弹框**：
-    /// 否则（CI、远程会话、输出被重定向、计划任务）模态框会永久阻塞无人应答的进程。
+    /// 否则（CI、服务会话、无人应答）模态框会永久阻塞进程。
     static void InfoBox(string text, string caption, uint icon = Native.MB_ICONINFORMATION)
     {
         if (!CanDialog())
@@ -664,6 +919,7 @@ static class PclVanillaRestore
         {
             // MB_SETFOREGROUND(0x10000) 确保弹到前台，不被启动器主窗吞掉
             Native.MessageBoxW(IntPtr.Zero, text, caption, Native.MB_OK | icon | 0x10000);
+            _feedbackGiven = true;
         }
         catch { Console.WriteLine($"[{caption}] {text}"); }
     }
@@ -672,9 +928,14 @@ static class PclVanillaRestore
     {
         try
         {
-            if (Console.IsOutputRedirected || Console.IsErrorRedirected) return false;
+            if (IsCiEnvironment()) return false;
             if (!Environment.UserInteractive) return false;
-            return true;
+            // GUI 宿主（双击）必须弹窗 —— 此时 std 句柄天然无效，
+            // 不能用"是否重定向"来否决。
+            if (_isGuiHost) return true;
+            // 控制台宿主：输出被管道/文件接管时不要弹模态框，否则会阻塞无人值守流程
+            // （实测漏掉这条会让 `--auto` 在管道下卡 12s 等文件选择框）。
+            return !_redirectedAtStart;
         }
         catch { return false; }
     }
@@ -761,8 +1022,11 @@ static class PclVanillaRestore
 
     static void PauseIfInteractive()
     {
+        // GUI 宿主（双击）没有控制台可暂停 —— 结果已通过弹窗告知，日志也落了文件，
+        // 直接返回即可；在这里 ReadKey 只会抛 InvalidOperationException。
+        if (_isGuiHost) return;
         if (!IsInteractiveDesktop()) return;
-        // 只在「本进程独占控制台」时暂停 —— 即双击 / 拖放新建出来的黑框，
+        // 只在「本进程独占控制台」时暂停 —— 即拖放到本程序图标上新建出来的黑框，
         // 否则用户看不到结果就闪退了。从已打开的终端里运行时不该拦人。
         if (!OwnsConsole()) return;
         Console.WriteLine();
