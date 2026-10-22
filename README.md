@@ -109,7 +109,7 @@ PCL2VanillaRestore.exe "Plain Craft Launcher 2.exe" --dry
 ### 输出示例
 
 ```
-PCL2 原版游戏下载入口恢复器 v2.99.0.4  （适配 PCL2 2.99.0.0）
+PCL2 原版游戏下载入口恢复器 v2.99.0.5  （适配 PCL2 2.99.0.0）
   目标 : D:\Downloads\Plain Craft Launcher 2.exe
   输出 : D:\Downloads\Plain Craft Launcher 2.exe   (原地修改，自动备份 .bak)
 
@@ -165,6 +165,29 @@ PCL2 原版游戏下载入口恢复器 v2.99.0.4  （适配 PCL2 2.99.0.0）
 解决办法：写回前先从 `PCL.Resources.resources` 把内嵌程序集解到临时目录（实测 14 个），
 喂给 Cecil 的 `AssemblyResolver`，写完立即删掉临时目录。**解出的依赖不会留在用户机器上。**
 
+### 三层嵌套 try 的坑（这个版本踩得最惨）
+
+被替换掉的那条 `ldstr` 位于**外层 `try` 内部**，同时是内层 `catch` 的 `HandlerEnd`，
+也是 14 条 `leave` 的落点。三个约束每一个都是靠实测踩出来的：
+
+1. **分派块必须插在 kill 原来的位置（`try` 内部）**。追加到方法末尾 → 落在 `finally`
+   handler 里 → `ret` 出现在 finally 中 → CLR 报「公共语言运行时检测到无效的程序」。
+2. **但也不能插在 `finally` 之后**。那时 `ZipArchive` 已被 `finally` 释放，
+   `InstallPack*` 拿到的是已 Dispose 的对象 → `ObjectDisposedException`
+   「无法访问已释放的对象」。
+3. **所以必须照 VB 编译器处理 `Try...Finally` 里 `Return` 的套路**：
+   `try` 内算出结果 → `stloc` 到局部变量 → `leave` 到 finally 之后
+   → finally 先执行 → 落到 `ldloc + ret`。
+   同时把 `finally` 的 `HandlerEnd` 从 `null`（一路延伸到方法末尾）收窄到 `ret` 块之前。
+
+最终 EH 结构（实测）：
+
+```
+Finally  try 0143..0276   h 0276..0282
+Catch    try 006D..0284   h 0284..02DA
+Finally  try 0027..03AD   h 03AD..03B7     ← HandlerEnd 明确收窄
+```
+
 ### 分支 / 异常边界的坑
 
 被删掉的那条 `ldstr` 不只是普通指令——它同时是 `try` 正常结束的 `leave` 目标和外层
@@ -178,12 +201,12 @@ PCL2 原版游戏下载入口恢复器 v2.99.0.4  （适配 PCL2 2.99.0.0）
 ## 版本策略
 
 **工具版本号前三段 = 其所适配的 PCL2 版本号**，末位是工具自身修订号（加特性 / 修 bug 时递增，
-不影响适配的 PCL 版本）。例如 `2.99.0.4` 表示「适配 PCL2 2.99.0 的第 4 次修订」。
+不影响适配的 PCL 版本）。例如 `2.99.0.5` 表示「适配 PCL2 2.99.0 的第 5 次修订」。
 
 工具启动时会打印适配版本，并在运行时校验目标：
 
 ```
-PCL2 原版游戏下载入口恢复器 v2.99.0.4  （适配 PCL2 2.99.0.0）
+PCL2 原版游戏下载入口恢复器 v2.99.0.5  （适配 PCL2 2.99.0.0）
   程序集  : Plain Craft Launcher 2 2.99.0.0  CLR v4.0.30319
 ```
 
