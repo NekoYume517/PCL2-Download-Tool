@@ -16,14 +16,14 @@
     <ApplicationIcon>assets\pcl2.ico</ApplicationIcon>
     <InvariantGlobalization>false</InvariantGlobalization>
 
-    <!-- 版本对齐 PCL2：前三段 = 所支持的 PCL2 版本（2.99.0），
-         末位为工具自身修订号（加特性/修 bug 时递增），不影响适配的 PCL 版本 -->
-    <Version>2.99.0.5</Version>
+    <!-- 版本 5 段 a.b.c.d.e：前 4 段 = 最新适配的 PCL2 版本，第 5 段 = 工具修订号。
+         NuGet 的 Version 只认 4 段，所以 Version 用 4 段语义值；
+         用户可见版本走 InformationalVersion（5 段），FileVersion 可为 4 段。 -->
+    <Version>2.99.0.1</Version>
     <AssemblyVersion>2.99.0.0</AssemblyVersion>
-    <FileVersion>2.99.0.5</FileVersion>
-    <InformationalVersion>2.99.0.5</InformationalVersion>
+    <FileVersion>2.99.0.1</FileVersion>
+    <InformationalVersion>2.99.0.1.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <SupportedPclVersion>2.99.0.0</SupportedPclVersion>
 
     <Authors>NekoYume517</Authors>
     <Product>PCL2 Vanilla Download Restore Tool</Product>
@@ -37,4 +37,8 @@
     <PackageReference Include="Mono.Cecil" Version="0.11.6" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 已验证适配的 PCL 版本集合（分号分隔），工具启动时读出来做版本对齐 -->
+    <AssemblyMetadata Include="SupportedPclVersions" Value="2.99.0.0;2.99.0.1" />
+  </ItemGroup>
 </Project>

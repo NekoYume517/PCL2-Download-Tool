@@ -66,7 +66,14 @@ static class PclVanillaRestore
     // 工具版本对齐其所支持的 PCL2 程序集版本。
     // 定位逻辑是模式匹配（不硬编码地址），因此对相邻版本通常也有效；
     // 这里只做提示：版本不等于已验证版本时给出 warning，但仍尝试。
-    const string SupportedPclVersion = "2.99.0.0";
+    // 已验证适配的 PCL 版本集合（csproj 的 AssemblyMetadata "SupportedPclVersions"，分号分隔）。
+    // 约定：工具版本 5 段 a.b.c.d.e —— 前 4 段 = 最新适配的 PCL 版本，第 5 段 = 工具修订号。
+    static readonly string[] SupportedPclVersions =
+        (typeof(PclVanillaRestore).Assembly.GetCustomAttributes(
+                typeof(System.Reflection.AssemblyMetadataAttribute), false)
+            .Cast<System.Reflection.AssemblyMetadataAttribute>()
+            .FirstOrDefault(x => x.Key == "SupportedPclVersions")?.Value ?? "2.99.0.0")
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     static string ToolVersion()
     {
@@ -261,6 +268,66 @@ static class PclVanillaRestore
                 code == 0 ? Native.MB_ICONINFORMATION : Native.MB_ICONERROR);
     }
 
+    // ---------------- 自更新提示 ----------------
+    // 工具版本 5 段 a.b.c.d.e（前 4 段 = 最新适配的 PCL 版本）。
+    // 当目标 PCL 版本不在已验证列表时，查 GitHub latest release：
+    //   · 若 latest 的前 4 段 == 目标 PCL 版本且第 5 段更新 → 提示有适配版本
+    //   · 若 latest 比本工具新（无论前 4 段）→ 提示可升级
+    // 只提示 + 询问，不静默下载（用户要求）。
+    static void CheckSelfUpdate(string targetPclVer, bool autoMode)
+    {
+        try
+        {
+            const string repo = "NekoYume517/PCL2-Download-Tool";
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.Add("User-Agent", "PCL2VanillaRestore");
+            var json = http.GetStringAsync($"https://api.github.com/repos/{repo}/releases/latest").GetAwaiter().GetResult();
+            // 极简解析：拿 tag_name 即可，避免引 JSON 库
+            var m = System.Text.RegularExpressions.Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([0-9.]+)\"");
+            if (!m.Success) return;
+            var latest = m.Groups[1].Value.TrimEnd('.');
+            var mine = ToolVersion().TrimEnd('.');
+            if (latest == mine) return;
+
+            var lp = latest.Split('.');
+            bool fitsTarget = lp.Length == 5 && string.Join(".", lp[0], lp[1], lp[2], lp[3]) == targetPclVer;
+            bool newer = CompareVersions(latest, mine) > 0;
+            if (!newer) return;
+
+            string msg = fitsTarget
+                ? $"检测到适配 PCL {targetPclVer} 的新版补丁 v{latest}（当前 v{mine}）。"
+                : $"检测到新版补丁 v{latest}（当前 v{mine}，最新版适配 PCL {string.Join(".", lp, 0, Math.Min(4, lp.Length))}）。";
+            Console.WriteLine($"  ★ {msg}");
+            Console.WriteLine($"    下载：https://github.com/{repo}/releases/tag/v{latest}");
+
+            if (autoMode && IsInteractiveDesktop())
+            {
+                var ok = InfoBoxYesNo(msg + "\n\n现在打开下载页吗？", "发现新版本");
+                if (ok)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = $"https://github.com/{repo}/releases/tag/v{latest}",
+                        UseShellExecute = true,
+                    });
+                }
+            }
+        }
+        catch { /* 网络失败等一律静默 —— 更新检查绝不能挡住主流程 */ }
+    }
+
+    static int CompareVersions(string a, string b)
+    {
+        var pa = a.Split('.'); var pb = b.Split('.');
+        int n = Math.Max(pa.Length, pb.Length);
+        for (int i = 0; i < n; i++)
+        {
+            int x = i < pa.Length && int.TryParse(pa[i], out var xa) ? xa : 0;
+            int y = i < pb.Length && int.TryParse(pb[i], out var yb) ? yb : 0;
+            if (x != y) return x.CompareTo(y);
+        }
+        return 0;
+    }
     /// 目标启动器是否正在运行。PCL2 运行时其 exe 被自己锁定，
     /// 原地改写会抛 IOException —— 这是"黑框一闪就没"的典型成因，必须提前给出可读提示。
     static bool IsPclRunningOn(string exePath)
@@ -302,7 +369,7 @@ static class PclVanillaRestore
         _quiet = args.Contains("--quiet");
 
         // banner 先于参数解析打印，确保 --help / 无目标 时也带着版本信息
-        Console.WriteLine($"PCL2 原版游戏下载入口恢复器 v{ToolVersion()}  （适配 PCL2 {SupportedPclVersion}）");
+        Console.WriteLine($"PCL2 原版游戏下载入口恢复器 v{ToolVersion()}  （已验证适配: {string.Join(" / ", SupportedPclVersions)}）");
 
         int positional = 0;
         for (int i = 0; i < args.Length; i++)
@@ -425,11 +492,14 @@ static class PclVanillaRestore
                 }
 
                 ver = asmName?.Version?.ToString() ?? "";
-                if (ver != SupportedPclVersion)
+                ver = asmName?.Version?.ToString() ?? "";
+                if (!SupportedPclVersions.Contains(ver))
                 {
-                    Console.WriteLine($"  ! 目标版本 {ver} ≠ 已验证版本 {SupportedPclVersion}");
+                    Console.WriteLine($"  ! 目标版本 {ver} 不在已验证列表 [{string.Join(", ", SupportedPclVersions)}] 内");
                     Console.WriteLine("    定位逻辑为模式匹配（不依赖硬编码地址），通常仍可尝试；");
                     Console.WriteLine("    若后续自检未通过，请勿使用该产物。");
+                    // 未适配版本：查本工具是否有适配它的新版 release（自更新提示）
+                    CheckSelfUpdate(ver, autoMode);
                 }
                 Console.WriteLine();
                 break;
@@ -452,8 +522,9 @@ static class PclVanillaRestore
 
         // 整合包解锁：这条链是另一套 kill（ModModpack），与方法体长度无关，需单独判断。
         // 注意：读取阶段不需要 resolver，只有写回时才需要内嵌依赖。
-        var modpackNeeded = NeedsModpackPatch(module, out bool modpackEntryKilled, out bool modpackDispatchKilled);
-
+        var modpackNeeded = NeedsModpackPatch(module, out bool modpackEntryKilled,
+                                              out bool modpackDispatchKilled, out bool modpackUiKilled,
+                                              out bool modpackDlKilled);
         if (sites.Count == 0 && !modpackNeeded)
         {
             var already = FindAlreadyRestored(allTypes);
@@ -494,6 +565,10 @@ static class PclVanillaRestore
                 Console.WriteLine("    · ModModpack::ModpackInstall()  —— 整段替换为只弹提示，真实现是「选文件 + 起线程安装」");
             if (modpackDispatchKilled)
                 Console.WriteLine("    · ModModpack::ModpackInstall(string,string,string)  —— 解析完包类型后无条件 throw，真实现是按类型分派");
+            if (modpackUiKilled)
+                Console.WriteLine("    · PageSelectLeft::McFolderListUI  —— 「导入整合包」列表项不再挂进面板（控件照建、入口不可见）");
+            if (modpackDlKilled)
+                Console.WriteLine("    · PageDownloadLeft::.ctor  —— 「下载游戏」侧栏入口被折叠，默认页改为 Mod");
             Console.WriteLine();
         }
 
@@ -587,7 +662,7 @@ static class PclVanillaRestore
         Console.WriteLine($"\n  已写出 : {outPath}  ({new FileInfo(outPath).Length:N0} 字节)");
 
         // ================= 4. 回读自检 =================
-        int rc = Verify(outPath, sites, file, outBuf, modpackApplied);
+        int rc = Verify(outPath, sites, file, outBuf, modpackApplied, modpackUiKilled, modpackDlKilled);
 
         // ================= 5. 自动模式下启动 =================
         if (autoMode)
@@ -837,7 +912,7 @@ static class PclVanillaRestore
         Console.WriteLine($"    异常处理块 : {s.Body.ExceptionHandlers.Count} 个（等长替换不影响其偏移）");
     }
 
-    static int Verify(string path, List<Site> sites, byte[] orig, byte[] now, string modpackNote)
+    static int Verify(string path, List<Site> sites, byte[] orig, byte[] now, string modpackNote, bool uiPatched, bool dlPatched)
     {
         Console.WriteLine("\n  —— 回读自检 ——");
         bool allOk = true;
@@ -874,6 +949,25 @@ static class PclVanillaRestore
                 var audit = new List<string>();
                 if (entry != null) audit.AddRange(ModpackPatch.Audit(entry));
                 if (full != null) audit.AddRange(ModpackPatch.Audit(full));
+
+                // ③ UI：「导入整合包」列表项应重新挂进 PanList
+                bool uOk = true;
+                if (uiPatched)
+                {
+                    var ui = ModpackPatch.FindUiSite(chk, out bool na);
+                    uOk = na || ui == null || !ui.MissingAdd;   // 已挂回：无此条目，或条目在但不再缺 Add
+                    Console.WriteLine($"    {(uOk ? "✓" : "✗")} 版本选择页「导入整合包」列表项已挂回面板={uOk}");
+                    allOk &= uOk;
+                }
+
+                // ④ 下载页：「下载游戏」入口不应再被折叠
+                if (dlPatched)
+                {
+                    var dl = chk.GetType("PCL.PageDownloadLeft")?.Methods.FirstOrDefault(x => x.Name == ".ctor");
+                    bool dOk2 = dl?.Body != null && !ModpackPatch.DownloadsLeftCollapsed(dl);
+                    Console.WriteLine($"    {(dOk2 ? "✓" : "✗")} 下载页「下载游戏」入口已恢复可见={dOk2}");
+                    allOk &= dOk2;
+                }
 
                 bool ok = eOk && dOk && audit.Count == 0;
                 Console.WriteLine($"    {(ok ? "✓" : "✗")} 整合包入口 ModpackInstall()  codeSize={(entry?.Body?.CodeSize ?? -1)}B  含 RunInThread={eOk}");
@@ -933,10 +1027,12 @@ static class PclVanillaRestore
         }
     }
 
-    // 判断整合包解锁是否需要动手（只读，不写盘）
-    static bool NeedsModpackPatch(ModuleDefinition module, out bool entryKilled, out bool dispatchKilled)
+    // 判断整合包解锁是否需要动手（只读，不写盘）。
+    // 三处关闭：①无参入口 ②有参分派 ③版本选择页把「导入整合包」列表项藏起来（.1 新增）。
+    static bool NeedsModpackPatch(ModuleDefinition module, out bool entryKilled,
+                                  out bool dispatchKilled, out bool uiKilled, out bool dlKilled)
     {
-        entryKilled = dispatchKilled = false;
+        entryKilled = dispatchKilled = uiKilled = dlKilled = false;
         var t = module.GetType("PCL.ModModpack");
         if (t == null) return false;
 
@@ -944,12 +1040,12 @@ static class PclVanillaRestore
         var full = t.Methods.FirstOrDefault(m => m.Name == "ModpackInstall" && m.Parameters.Count == 3);
         if (entry == null || full == null) return false;
 
-        // 入口被替换：整段只有 newobj closure + Hint + ret，没有 RunInThread
+        // ① 入口被替换：整段只有 newobj closure + Hint + ret，没有 RunInThread
         if (entry.Body != null && !entry.Body.Instructions.Any(i =>
                 i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "RunInThread"))
             entryKilled = true;
 
-        // 分派被替换：没有 switch，且含 kill 字符串
+        // ② 分派被替换：没有 switch，且含 kill 字符串
         if (full.Body != null)
         {
             bool hasSwitch = full.Body.Instructions.Any(i => i.OpCode == OpCodes.Switch);
@@ -957,7 +1053,31 @@ static class PclVanillaRestore
                 i.OpCode == OpCodes.Ldstr && i.Operand is string s && s.Contains(KillHintA));
             if (hasKill && !hasSwitch) dispatchKilled = true;
         }
-        return entryKilled || dispatchKilled;
+
+        // ③ UI 入口被藏：版本选择页有「导入整合包」条目，但没挂进 PanList
+        //    FindUiSite 找到条目后用 MissingAdd 区分"已挂回"(.0) 与"被藏起来"(.1)
+        var ui = ModpackPatch.FindUiSite(module, out bool notApplicable);
+        if (ui != null) uiKilled = ui.MissingAdd;
+        // ui==null 且 notApplicable：该版本没有此入口项或结构不同，不适用
+
+        // ④ 下载页「下载游戏」入口被折叠（.1 新增：PageDownloadLeft..ctor）
+        var dlCtor = module.GetType("PCL.PageDownloadLeft")?.Methods.FirstOrDefault(x => x.Name == ".ctor");
+        if (dlCtor?.Body != null)
+        {
+            var dins = dlCtor.Body.Instructions.ToList();
+            for (int i = 0; i + 2 < dins.Count; i++)
+            {
+                if (dins[i].OpCode == OpCodes.Callvirt && dins[i].Operand is MethodReference g &&
+                    g.Name == "get_ItemInstall" &&
+                    (dins[i + 1].OpCode.Code == Code.Ldc_I4 && (int)dins[i + 1].Operand == 2 ||
+                     dins[i + 1].OpCode.Code == Code.Ldc_I4_2) &&
+                    dins[i + 2].OpCode == OpCodes.Callvirt && dins[i + 2].Operand is MethodReference s &&
+                    s.Name == "set_Visibility")
+                { dlKilled = true; break; }
+            }
+        }
+
+        return entryKilled || dispatchKilled || uiKilled || dlKilled;
     }
 
     // 对已写出的 exe 做 Cecil 重写（原地：读 → 改 → 写临时 → 替换）
@@ -1129,6 +1249,11 @@ static class PclVanillaRestore
 
     /// 弹模态提示框。**仅在真正可交互的桌面环境弹框**：
     /// 否则（CI、服务会话、无人应答）模态框会永久阻塞进程。
+    static bool InfoBoxYesNo(string text, string title)
+    {
+        // MB_OKCANCEL(1) + MB_ICONQUESTION(32)；IDOK=1, IDCANCEL=2
+        return Native.MessageBoxW(IntPtr.Zero, text, title, 1 | 32) == 1;
+    }
     static void InfoBox(string text, string caption, uint icon = Native.MB_ICONINFORMATION)
     {
         if (!CanDialog())
